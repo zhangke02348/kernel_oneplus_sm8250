@@ -1,66 +1,96 @@
-name: Build SukiSU-Ultra Kernel (通用版)
+name: Build SukiSU-Ultra Kernel (SM8250)
 
 on:
   workflow_dispatch:
     inputs:
+      branch:
+        description: 'Kernel Branch'
+        required: true
+        default: 'udc'
       defconfig:
-        description: 'Defconfig (推荐 evo_defconfig 或 defconfig)'
+        description: 'Defconfig (推荐: evo_defconfig 或 sm8250_defconfig)'
         required: true
         default: 'evo_defconfig'
-      device_name:
+      codename:
         description: '设备代号 (oneplus8 / kebab / instantnoodle 等)'
         required: true
         default: 'oneplus8'
+      upload_release:
+        description: '编译成功后自动发布 Release'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  ARCH: arm64
+  OUT_DIR: out
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
     steps:
-      - name: Checkout Kernel Source
+      - name: 📦 安装编译依赖
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y git curl wget zip unzip bc bison flex libssl-dev \
+            libelf-dev python3 make gcc g++ clang lld llvm device-tree-compiler ccache
+
+      - name: 🐧 Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          ref: udc
+          ref: ${{ inputs.branch }}
 
-      - name: Install Build Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git curl wget python3 bc bison flex libssl-dev make gcc g++ clang lld llvm libelf-dev device-tree-compiler ccache zip
-
-      - name: Integrate SukiSU-Ultra + SUSFS（推荐）
+      - name: 🔑 集成 SukiSU-Ultra + SUSFS（推荐）
         run: |
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
 
-      - name: Build Setup
+      - name: 📋 Make Defconfig
         run: |
-          mkdir -p out
-          echo "ARCH=arm64" >> $GITHUB_ENV
-          echo "SUBARCH=arm64" >> $GITHUB_ENV
+          mkdir -p ${{ env.OUT_DIR }}
+          make O=${{ env.OUT_DIR }} ${{ inputs.defconfig }}
 
-      - name: Make Defconfig
-        run: make O=out ${{ inputs.defconfig }}
-
-      - name: Compile Kernel
+      - name: 🔨 编译内核
         run: |
-          make O=out -j$(nproc) \
+          make O=${{ env.OUT_DIR }} -j$(nproc) \
+            ARCH=${{ env.ARCH }} \
             CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
 
-      - name: Package AnyKernel3
+      - name: 📦 打包 AnyKernel3
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3.git
-          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+          
+          cp -f ${{ env.OUT_DIR }}/arch/arm64/boot/Image.gz-dtb AnyKernel3/ 2>/dev/null || \
+          cp -f ${{ env.OUT_DIR }}/arch/arm64/boot/Image AnyKernel3/
+          
           cd AnyKernel3
           
-          # 通用设备支持配置
-          sed -i "s/device.name1=.*/device.name1=${{ inputs.device_name }}/" anykernel.sh
-          sed -i "s/device.name2=.*/device.name2=OnePlus8Pro/" anykernel.sh
-          sed -i "s/device.name3=.*/device.name3=kebab/" anykernel.sh
-          sed -i "s/device.name4=.*/device.name4=instantnoodle/" anykernel.sh
+          # 配置设备
+          sed -i "s/device.name1=.*/device.name1=${{ inputs.codename }}/" anykernel.sh
+          sed -i "s/kernel.string=.*/kernel.string=SukiSU-Ultra ${{
+           inputs.codename }}/" anykernel.sh
           
-          zip -r9 ../SukiSU-Ultra-Kernel.zip * -x .git README.md *placeholder
+          ZIP_NAME="SukiSU-Ultra-${{ inputs.codename }}-${{ github.run_number }}.zip"
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          
+          zip -r9 "../$ZIP_NAME" . -x ".git*" "*.md" "LICENSE" "*placeholder"
 
-      - name: Upload Kernel ZIP
+      - name: ⬆️ 上传 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SukiSU-Ultra-Kernel
-          path: SukiSU-Ultra-Kernel.zip
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 7
+
+      - name: 🚀 发布 Release（可选）
+        if: inputs.upload_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: SukiSU-${{ github.run_number }}
+          name: SukiSU-Ultra ${{ inputs.codename }}
+          files: ${{ env.ZIP_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
